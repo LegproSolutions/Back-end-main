@@ -1,0 +1,550 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String           @id @default(uuid())
+  name           String
+  email          String           @unique
+  phone          String?
+  password       String?
+  resume         String?
+  image          String?
+  isTempPassword Boolean          @default(false)
+  crmCandidates  CRMCandidate[]
+  applications   JobApplication[]
+  notifications  Notification[]
+  profile        UserProfile?
+}
+
+model Admin {
+  id           String           @id @default(uuid())
+  name         String
+  email        String           @unique
+  password     String
+  role         String           @default("admin")
+  createdAt    DateTime         @default(now())
+  jobs         Job[]
+  applications JobApplication[] @relation("AdminReviewer")
+}
+
+model Company {
+  id                 String           @id @default(uuid())
+  name               String           @unique
+  email              String
+  phone              String
+  image              String
+  password           String
+  isVerified         Boolean          @default(false)
+  havePremiumAccess  Boolean          @default(false)
+  city               String?
+  country            String?
+  createdAt          DateTime         @default(now())
+  description        String?
+  isTempPassword     Boolean          @default(false)
+  state              String?
+  updatedAt          DateTime         @default(now()) @updatedAt
+  website            String?
+  pendingEmailChange String?
+  pendingNameChange  String?
+  industry           String?
+  campaigns          Campaign[]
+  crmClient          Client?
+  staff              CompanyStaff[]
+  documents          Document[]
+  interviews         Interview[]
+  jobs               Job[]
+  applications       JobApplication[]
+  jobFairCompanies   JobFairCompany[]
+  notifications      Notification[]
+  offers             Offer[]
+}
+
+model Job {
+  id                    String           @id @default(uuid())
+  title                 String
+  description           String
+  location              String
+  category              String
+  deadline              DateTime
+  level                 String
+  experience            Int
+  salary                Int
+  openings              Int
+  date                  DateTime
+  visible               Boolean          @default(true)
+  requirements          Json?
+  employmentType        String
+  qualification         String?
+  companyId             String
+  createdBy             String?
+  companyDetails        Json
+  isVerified            Boolean          @default(false)
+  isViewApplicant       Boolean          @default(false)
+  objections            Json?
+  objectionsTrack       Json?
+  isEdited              Boolean          @default(false)
+  jobId                 Int              @unique @default(autoincrement())
+  status                String           @default("Pending Admin Verification")
+  benefits              Json?
+  educationRequirements Json?
+  experienceOption      String?
+  filledVacancies       Int?             @default(0)
+  genderPreference      String?
+  hrContact             Json?
+  immediateJoining      Boolean?
+  interviewProcess      Json?
+  joiningWithin         String?
+  languages             Json?
+  maxAge                Int?
+  maxExperience         Int?
+  minAge                Int?
+  minExperience         Int?
+  requiredDocuments     Json?
+  salaryBreakdown       Json?
+  screeningQuestions    Json?
+  shiftDetails          Json?
+  vacancies             Int?
+  workLocationDetails   Json?
+  jobType               String?
+  crmJobs               CRMJob[]
+  company               Company          @relation(fields: [companyId], references: [id])
+  admin                 Admin?           @relation(fields: [createdBy], references: [id])
+  applications          JobApplication[]
+}
+
+model JobApplication {
+  id              String    @id @default(uuid())
+  userId          String
+  companyId       String
+  jobId           String
+  applicationData Json
+  status          String    @default("pending")
+  interview       String    @default("Not Interviewed")
+  onboarding      String    @default("Not Onboarded")
+  date            BigInt
+  reviewedBy      String?
+  reviewedAt      DateTime?
+  rejectionReason String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  company         Company   @relation(fields: [companyId], references: [id])
+  job             Job       @relation(fields: [jobId], references: [id])
+  admin           Admin?    @relation("AdminReviewer", fields: [reviewedBy], references: [id])
+  user            User      @relation(fields: [userId], references: [id])
+}
+
+model UserProfile {
+  id               String    @id @default(uuid())
+  userId           String    @unique
+  firstName        String?
+  lastName         String?
+  middleName       String?
+  email            String    @unique
+  phone            String?
+  alternatePhone   String?
+  dateOfBirth      DateTime?
+  gender           String?
+  maritalStatus    String?
+  nationality      String    @default("Indian")
+  fatherName       String?
+  aadharNumber     String?
+  address          Json?
+  permanentAddress Json?
+  education        Json?
+  experience       Json?
+  professional     Json?
+  skills           Json?
+  skillsDetailed   Json?
+  languages        Json?
+  documents        Json?
+  socialLinks      Json?
+  preferences      Json?
+  resume           Json?
+  profilePicture   String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @default(now()) @updatedAt
+  user             User      @relation(fields: [userId], references: [id])
+}
+
+model Client {
+  id             String              @id @default(uuid())
+  company_name   String
+  industry       String
+  contact_person String
+  email          String?
+  phone          String?
+  location       String?
+  status         String              @default("active")
+  isDeleted      Boolean             @default(false)
+  deletedAt      DateTime?
+  createdBy      String?
+  updatedBy      String?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  companyId      String?             @unique
+  candidates     CRMCandidate[]
+  jobs           CRMJob[]            @relation("ClientJobs")
+  pipelines      CandidatePipeline[]
+  company        Company?            @relation(fields: [companyId], references: [id])
+  allocations    ClientAllocation[]
+}
+
+model CRMCandidate {
+  id                    String              @id @default(uuid())
+  name                  String
+  phone                 String              @unique
+  email                 String?
+  education             String?
+  experience            String?
+  state                 String?
+  district              String?
+  city                  String?
+  currentIndustry       String?
+  preferredLocation     String?
+  interestStatus        String?
+  trades                String?             @db.Text
+  dob                   String?
+  gender                String?
+  resume_url            String?
+  status                String              @default("Applied")
+  source                String              @default("Direct")
+  assigned_recruiter    String?
+  client_id             String?
+  isDeleted             Boolean             @default(false)
+  deletedAt             DateTime?
+  createdBy             String?
+  updatedBy             String?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  aadhaarAvailable      Boolean             @default(false)
+  bankAccountAvailable  Boolean             @default(false)
+  joiningAvailability   String?
+  matchScore            Int?
+  panAvailable          Boolean             @default(false)
+  recommendationStatus  String?
+  relocationWillingness String?
+  salaryExpectation     String?
+  shiftReadiness        String?
+  userId                String?
+  followUpDate          String?
+  followUpNotes         String?
+  followUpTime          String?
+  aiScreening           AIScreening?
+  client                Client?             @relation(fields: [client_id], references: [id])
+  user                  User?               @relation(fields: [userId], references: [id])
+  calls                 Call[]
+  campaignRecipients    CampaignRecipient[]
+  pipelines             CandidatePipeline[]
+  documents             Document[]
+  interviews            Interview[]
+  jobFairAttendees      JobFairAttendee[]
+  offers                Offer[]
+
+  @@index([email])
+  @@index([phone])
+  @@index([assigned_recruiter])
+  @@index([client_id])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model PipelineStage {
+  id         String              @id @default(uuid())
+  stage_name String              @unique
+  order      Int                 @default(0)
+  pipelines  CandidatePipeline[]
+}
+
+model CandidatePipeline {
+  id           String        @id @default(uuid())
+  candidate_id String
+  client_id    String
+  stage_id     String
+  notes        String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @default(now()) @updatedAt
+  candidate    CRMCandidate  @relation(fields: [candidate_id], references: [id])
+  client       Client        @relation(fields: [client_id], references: [id])
+  stage        PipelineStage @relation(fields: [stage_id], references: [id])
+
+  @@unique([candidate_id, client_id, stage_id])
+}
+
+model Call {
+  id            String       @id @default(uuid())
+  candidate_id  String
+  recruiter_id  String
+  duration      Int          @default(0)
+  status        String
+  recording_url String?
+  notes         String?
+  createdAt     DateTime     @default(now())
+  candidateName String?
+  disposition2  String?
+  followUpDate  String?
+  followUpTime  String?
+  mobileNumber  String?
+  recruiterName String?
+  remarks       String?
+  candidate     CRMCandidate @relation(fields: [candidate_id], references: [id])
+}
+
+model AssignmentHistory {
+  id               String    @id @default(uuid())
+  assignedBy       String
+  assignedTo       String
+  assignmentDate   DateTime  @default(now())
+  reassignmentDate DateTime?
+  previousOwner    String?
+  currentOwner     String
+  clientId         String?
+  jobId            String?
+  candidateId      String
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+model AIScreening {
+  id           String       @id @default(uuid())
+  candidate_id String       @unique
+  score        Int
+  summary      String?
+  skills       String?
+  experience   String?
+  status       String
+  createdAt    DateTime     @default(now())
+  candidate    CRMCandidate @relation(fields: [candidate_id], references: [id])
+}
+
+model CRMJob {
+  id              String      @id @default(uuid())
+  title           String
+  client_id       String
+  location        String?
+  minSalary       String?
+  maxSalary       String?
+  minAge          Int?        @default(18)
+  maxAge          Int?        @default(45)
+  openPositions   Int         @default(1)
+  filledPositions Int         @default(0)
+  status          String      @default("open")
+  postedDate      DateTime    @default(now())
+  requirements    String?
+  education       String?
+  specialization  String?
+  minExperience   String?     @default("0")
+  isDeleted       Boolean     @default(false)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  jobId           String?
+  client          Client      @relation("ClientJobs", fields: [client_id], references: [id])
+  job             Job?        @relation(fields: [jobId], references: [id])
+  campaigns       Campaign[]
+  interviews      Interview[]
+  offers          Offer[]
+
+  @@index([client_id])
+}
+
+model ActivityLog {
+  id         String   @id @default(uuid())
+  action     String
+  entityType String
+  entityId   String?
+  userId     String?
+  details    String?
+  createdAt  DateTime @default(now())
+}
+
+model CompanyStaff {
+  id          String             @id @default(uuid())
+  companyId   String
+  name        String
+  email       String             @unique
+  phone       String?
+  password    String
+  role        String             @default("recruiter")
+  permissions Json?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  isActive    Boolean            @default(true)
+  allocations ClientAllocation[]
+  company     Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String?
+  companyId String?
+  staffId   String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model Interview {
+  id          String       @id @default(uuid())
+  candidateId String
+  companyId   String
+  jobId       String?
+  type        String
+  scheduledAt DateTime
+  location    String?
+  meetingLink String?
+  scorecard   Json?
+  feedback    String?
+  attendance  String       @default("pending")
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  candidate   CRMCandidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  company     Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  job         CRMJob?      @relation(fields: [jobId], references: [id])
+}
+
+model Offer {
+  id                String       @id @default(uuid())
+  candidateId       String
+  companyId         String
+  jobId             String?
+  type              String
+  pdfUrl            String
+  status            String       @default("draft")
+  signedByEmployer  Boolean      @default(false)
+  signedByCandidate Boolean      @default(false)
+  acceptedAt        DateTime?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  candidate         CRMCandidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  company           Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  job               CRMJob?      @relation(fields: [jobId], references: [id])
+}
+
+model Document {
+  id          String       @id @default(uuid())
+  candidateId String
+  companyId   String
+  name        String
+  type        String
+  url         String
+  ocrData     Json?
+  status      String       @default("pending")
+  expiryDate  DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  candidate   CRMCandidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  company     Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model Campaign {
+  id             String              @id @default(uuid())
+  name           String
+  companyId      String
+  jobId          String?
+  status         String              @default("queued")
+  channel        String              @default("voice")
+  totalCount     Int                 @default(0)
+  completedCount Int                 @default(0)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  company        Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  job            CRMJob?             @relation(fields: [jobId], references: [id])
+  recipients     CampaignRecipient[]
+}
+
+model CampaignRecipient {
+  id            String       @id @default(uuid())
+  campaignId    String
+  candidateId   String
+  status        String       @default("queued")
+  duration      Int?
+  response      String?
+  interestLevel String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  campaign      Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  candidate     CRMCandidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+}
+
+model JobFair {
+  id                 String            @id @default(uuid())
+  name               String
+  venue              String
+  date               DateTime
+  time               String
+  expectedCandidates Int               @default(0)
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  attendees          JobFairAttendee[]
+  companies          JobFairCompany[]
+}
+
+model JobFairAttendee {
+  id             String       @id @default(uuid())
+  jobFairId      String
+  candidateId    String
+  checkedIn      Boolean      @default(false)
+  checkedInAt    DateTime?
+  attendance     String?
+  offersReleased Int          @default(0)
+  createdAt      DateTime     @default(now())
+  candidate      CRMCandidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  jobFair        JobFair      @relation(fields: [jobFairId], references: [id], onDelete: Cascade)
+}
+
+model JobFairCompany {
+  id        String  @id @default(uuid())
+  jobFairId String
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  jobFair   JobFair @relation(fields: [jobFairId], references: [id], onDelete: Cascade)
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  companyId String?
+  userId    String?
+  channel   String
+  title     String
+  message   String
+  status    String   @default("sent")
+  createdAt DateTime @default(now())
+  company   Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  companyId String?
+  userId    String?
+  action    String
+  details   String?
+  createdAt DateTime @default(now())
+}
+
+model ClientAllocation {
+  id        String       @id @default(uuid())
+  clientId  String
+  staffId   String
+  createdAt DateTime     @default(now())
+  client    Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  staff     CompanyStaff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, staffId])
+}
+
+model CandidateJobChecklist {
+  id          String   @id @default(uuid())
+  candidateId String
+  jobId       String
+  answers     Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([candidateId, jobId])
+}
