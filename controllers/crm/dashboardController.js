@@ -150,9 +150,15 @@ export const getCRMDashboardStats = async (req, res) => {
     const totalSelected = joinedCount + selectedCount + dropoutCount;
     const joiningRatio = totalSelected > 0 ? Math.round((joinedCount / totalSelected) * 100) : 0;
 
-    // 7. Recent activities (Audit Logs)
     const recentActivities = await prisma.auditLog.findMany({
-      where: { companyId },
+      where: { 
+        companyId,
+        NOT: {
+          action: {
+            in: ["TEAM_MEMBER_CREATED", "TEAM_MEMBER_UPDATED"]
+          }
+        }
+      },
       orderBy: { createdAt: "desc" },
       take: 10
     });

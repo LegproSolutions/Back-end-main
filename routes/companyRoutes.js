@@ -14,7 +14,8 @@ import {
   logoutCompany,
   forgotPassword,
   updatePassword,
-  updateCompanyProfile
+  updateCompanyProfile,
+  getCompanyAllApplications
 } from "../controllers/companyController.js";
 import upload from "../config/multer.js";
 import { protectCompany } from "../middleware/authMiddleware.js";
@@ -32,6 +33,9 @@ router.post("/logout", logoutCompany);
 
 // Get company data
 router.get("/company", protectCompany, getCompanyData);
+
+// Get all applications
+router.get("/all-applications", protectCompany, getCompanyAllApplications);
 
 // Update company data
 router.put("/update-company", protectCompany, upload.single("image"), updateCompanyProfile);

@@ -67,6 +67,9 @@ const corsOptions = {
     "Keep-Alive",
     "X-Requested-With",
     "If-Modified-Since",
+    "token",
+    "x-admin-token",
+    "admintoken",
   ],
   optionsSuccessStatus: 200,
 };
@@ -77,11 +80,18 @@ app.options("*", cors(corsOptions)); // Enable preflight
 // ✅ Middleware Config
 app.use(
   express.json({
+    limit: "10mb",
     verify: (req, res, buf) => {
       req.rawBody = buf.toString();
     },
   })
 );
+
+app.use(express.urlencoded({
+  limit: "10mb",
+  extended: true,
+}));
+
 app.use(cookieParser());
 
 // ✅ Optional: Redirect HTTP → HTTPS
@@ -122,7 +132,7 @@ function escapeHtml(unsafe) {
 // Serve resumes with explicit sendFile and headers to prevent blank pages in browser
 app.get('/uploads/resumes/:filename', (req, res) => {
   const filePath = path.join(__dirname, 'public/uploads/resumes', req.params.filename);
-  
+
   // Check if file exists
   if (!fs.existsSync(filePath)) {
     res.status(404).setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -192,7 +202,7 @@ app.get('/uploads/resumes/:filename', (req, res) => {
     const fd = fs.openSync(filePath, 'r');
     fs.readSync(fd, buffer, 0, 10, 0);
     fs.closeSync(fd);
-    
+
     const fileHeader = buffer.toString('utf-8');
     const isRealPdf = fileHeader.startsWith('%PDF-');
 
@@ -335,5 +345,5 @@ const startServer = async () => {
   }
 };
 
-startServer(); 
+startServer();
 

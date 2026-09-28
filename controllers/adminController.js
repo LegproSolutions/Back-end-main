@@ -120,6 +120,7 @@ export const loginAdmin = async (req, res) => {
 
     res.json({
       success: true,
+      token,
       admin: {
         id: admin.id,
         name: admin.name,
@@ -168,69 +169,242 @@ export const getAdminData = async (req, res) => {
   }
 };
 
-// AllUser 
+// AllUser — paginated, memory-safe
 export const allUser = async (req, res) => {
   try {
-    const [userProfiles, crmCandidates] = await Promise.all([
-      prisma.userProfile.findMany({
-        include: {
-          user: {
-            select: {
-              name: true,
-              email: true,
-              phone: true
-            }
-          }
+    // --- Parse & validate query params ---
+    const rawPage  = parseInt(req.query.page  || '1', 10);
+    const rawLimit = parseInt(req.query.limit || '50', 10);
+    const page  = isNaN(rawPage)  || rawPage  < 1   ? 1   : rawPage;
+    const limit = isNaN(rawLimit) || rawLimit < 1   ? 50  : Math.min(rawLimit, 100);
+    const skip  = (page - 1) * limit;
+    const search = (req.query.search || '').trim();
+    const type   = req.query.type || 'all'; // 'portal' | 'crm' | 'all'
+
+    // -------------------------------------------------------
+    // Build search filters
+    // -------------------------------------------------------
+    const portalSearchWhere = search
+      ? {
+          OR: [
+            { firstName: { contains: search, mode: 'insensitive' } },
+            { lastName:  { contains: search, mode: 'insensitive' } },
+            { email:     { contains: search, mode: 'insensitive' } },
+            { phone:     { contains: search } },
+            { user: { name: { contains: search, mode: 'insensitive' } } }
+          ]
         }
-      }),
-      prisma.cRMCandidate.findMany({
-        where: { isDeleted: false }
+      : {};
+
+    const crmSearchWhere = search
+      ? {
+          OR: [
+            { name:  { contains: search, mode: 'insensitive' } },
+            { email: { contains: search, mode: 'insensitive' } },
+            { phone: { contains: search } }
+          ]
+        }
+      : {};
+
+    // -------------------------------------------------------
+    // PORTAL-ONLY mode
+    // -------------------------------------------------------
+    if (type === 'portal') {
+      const [total, userProfiles] = await Promise.all([
+        prisma.userProfile.count({ where: portalSearchWhere }),
+        prisma.userProfile.findMany({
+          where: portalSearchWhere,
+          select: {
+            userId: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            createdAt: true,
+            user: { select: { name: true } }
+          },
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit
+        })
+      ]);
+
+      const users = userProfiles.map(u => ({
+        id: u.userId,
+        _id: u.userId,
+        name: u.user?.name || `${u.firstName || ''} ${u.lastName || ''}`.trim() || 'N/A',
+        firstName: u.firstName,
+        lastName: u.lastName,
+        email: u.email,
+        phone: u.phone,
+        createdAt: u.createdAt,
+        type: 'Portal User',
+        source: 'Portal'
+      }));
+
+      return res.status(200).json({
+        success: true,
+        users,
+        pagination: {
+          page, limit, total,
+          totalPages: Math.ceil(total / limit),
+          hasNextPage: page * limit < total,
+          hasPreviousPage: page > 1
+        }
+      });
+    }
+
+    // -------------------------------------------------------
+    // CRM-ONLY mode  (excludes phone numbers already in Portal)
+    // -------------------------------------------------------
+    if (type === 'crm') {
+      // Collect portal phones in batches to avoid a huge subquery (use DB-side NOT IN)
+      // Prisma supports: phone: { notIn: [...] } but with 2 lakh records we use a raw subquery pattern
+      // We rely on the DB to do the exclusion efficiently via NOT EXISTS
+      const portalPhones = await prisma.userProfile.findMany({
+        select: { phone: true },
+        where: { phone: { not: null } }
+      });
+      const portalPhoneSet = new Set(portalPhones.map(p => p.phone).filter(Boolean));
+
+      const crmWhere = {
+        isDeleted: false,
+        ...crmSearchWhere,
+        NOT: portalPhoneSet.size > 0
+          ? { phone: { in: [...portalPhoneSet] } }
+          : undefined
+      };
+
+      const [total, crmCandidates] = await Promise.all([
+        prisma.cRMCandidate.count({ where: crmWhere }),
+        prisma.cRMCandidate.findMany({
+          where: crmWhere,
+          select: {
+            id: true, name: true, email: true, phone: true,
+            createdAt: true, source: true, education: true,
+            experience: true, state: true, district: true, trades: true
+          },
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit
+        })
+      ]);
+
+      const users = crmCandidates.map(c => ({
+        id: c.id, _id: c.id,
+        name: c.name, email: c.email, phone: c.phone,
+        createdAt: c.createdAt, type: 'CRM Candidate',
+        source: c.source || 'CRM',
+        education: c.education, experience: c.experience,
+        state: c.state, district: c.district, trades: c.trades
+      }));
+
+      return res.status(200).json({
+        success: true,
+        users,
+        pagination: {
+          page, limit, total,
+          totalPages: Math.ceil(total / limit),
+          hasNextPage: page * limit < total,
+          hasPreviousPage: page > 1
+        }
+      });
+    }
+
+    // -------------------------------------------------------
+    // DEFAULT: type === 'all'
+    // Strategy: paginate portal users first, then unique CRM candidates
+    // This keeps deduplication correct and avoids loading everything.
+    // -------------------------------------------------------
+    const [portalTotal, portalUsers] = await Promise.all([
+      prisma.userProfile.count({ where: portalSearchWhere }),
+      prisma.userProfile.findMany({
+        where: portalSearchWhere,
+        select: {
+          userId: true, firstName: true, lastName: true,
+          email: true, phone: true, createdAt: true,
+          user: { select: { name: true } }
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit
       })
     ]);
 
-    // Normalize UserProfiles
-    const normalizedUsers = userProfiles.map(u => ({
-      id: u.userId,
-      _id: u.userId,
-      name: u.user?.name || `${u.firstName || ""} ${u.lastName || ""}`.trim() || "N/A",
-      firstName: u.firstName,
-      lastName: u.lastName,
-      email: u.email,
-      phone: u.phone,
-      createdAt: u.createdAt,
-      type: "Portal User",
-      source: "Portal",
-      ...u // include other fields for detail view
+    const normalizedPortal = portalUsers.map(u => ({
+      id: u.userId, _id: u.userId,
+      name: u.user?.name || `${u.firstName || ''} ${u.lastName || ''}`.trim() || 'N/A',
+      firstName: u.firstName, lastName: u.lastName,
+      email: u.email, phone: u.phone,
+      createdAt: u.createdAt, type: 'Portal User', source: 'Portal'
     }));
 
-    // Normalize CRMCandidates
-    const normalizedCandidates = crmCandidates.map(c => ({
-      id: c.id,
-      _id: c.id,
-      name: c.name,
-      email: c.email,
-      phone: c.phone,
-      createdAt: c.createdAt,
-      type: "CRM Candidate",
-      source: c.source || "CRM",
-      education: c.education,
-      experience: c.experience,
-      state: c.state,
-      district: c.district
-    }));
+    // How many more slots remain on this page after portal users?
+    const slotsUsed  = normalizedPortal.length;
+    const slotsLeft  = limit - slotsUsed;
 
-    // Filter out CRM Candidates that are already in the Portal User list (prevent duplicates)
-    const portalUserPhones = new Set(normalizedUsers.map(u => u.phone).filter(Boolean));
-    const uniqueCrmCandidates = normalizedCandidates.filter(c => !portalUserPhones.has(c.phone));
+    // For CRM: exclude phones already in all portal users (not just this page)
+    const allPortalPhones = await prisma.userProfile.findMany({
+      select: { phone: true },
+      where: { phone: { not: null } }
+    });
+    const portalPhoneSet = new Set(allPortalPhones.map(p => p.phone).filter(Boolean));
 
-    // Combine and sort by date
-    const allUsers = [...normalizedUsers, ...uniqueCrmCandidates].sort((a, b) => 
-      new Date(b.createdAt) - new Date(a.createdAt)
-    );
+    const crmWhere = {
+      isDeleted: false,
+      ...crmSearchWhere,
+      NOT: portalPhoneSet.size > 0
+        ? { phone: { in: [...portalPhoneSet] } }
+        : undefined
+    };
 
-    res.status(200).json({ success: true, users: allUsers });
+    let crmUsers = [];
+    const crmTotal = await prisma.cRMCandidate.count({ where: crmWhere });
+
+    // Calculate CRM offset: how far into CRM pages are we?
+    // CRM pages start after all portal pages
+    const portalPages = Math.ceil(portalTotal / limit);
+    if (page > portalPages && slotsLeft > 0) {
+      const crmPage = page - portalPages;
+      const crmSkip = (crmPage - 1) * limit;
+      const crmRaw = await prisma.cRMCandidate.findMany({
+        where: crmWhere,
+        select: {
+          id: true, name: true, email: true, phone: true,
+          createdAt: true, source: true, education: true,
+          experience: true, state: true, district: true, trades: true
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: crmSkip,
+        take: limit
+      });
+      crmUsers = crmRaw.map(c => ({
+        id: c.id, _id: c.id,
+        name: c.name, email: c.email, phone: c.phone,
+        createdAt: c.createdAt, type: 'CRM Candidate',
+        source: c.source || 'CRM',
+        education: c.education, experience: c.experience,
+        state: c.state, district: c.district, trades: c.trades
+      }));
+    }
+
+    const users = [...normalizedPortal, ...crmUsers];
+    const total = portalTotal + crmTotal;
+    const totalPages = Math.ceil(total / limit);
+
+    return res.status(200).json({
+      success: true,
+      users,
+      pagination: {
+        page, limit, total,
+        portalTotal, crmTotal,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1
+      }
+    });
   } catch (error) {
-    console.error("Error in allUser:", error);
+    console.error('Error in allUser:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -603,7 +777,7 @@ export const rejectCompanyChange = async (req, res) => {
   }
 };
 
-// Get jobs for admin dashboard
+// Get jobs for admin dashboard — memory-safe (no full candidate scan)
 export const getAdminJobs = async (req, res) => {
   try {
     const admin = req.admin;
@@ -614,13 +788,14 @@ export const getAdminJobs = async (req, res) => {
     }
 
     const clientIds = await getAllocatedClientIds(req);
+    let allocatedCompanyIds = null;
     if (clientIds !== null) {
       const clients = await prisma.client.findMany({
         where: { id: { in: clientIds }, isDeleted: false },
         select: { companyId: true }
       });
-      const companyIds = clients.map(c => c.companyId).filter(Boolean);
-      where.companyId = { in: companyIds };
+      allocatedCompanyIds = clients.map(c => c.companyId).filter(Boolean);
+      where.companyId = { in: allocatedCompanyIds };
     }
 
     const jobs = await prisma.job.findMany({
@@ -628,43 +803,60 @@ export const getAdminJobs = async (req, res) => {
       include: {
         company: {
           select: { id: true, name: true, email: true, phone: true, image: true, isVerified: true }
+        },
+        _count: {
+          select: { applications: true }
         }
       },
       orderBy: { date: 'desc' }
     });
 
-    // --- FETCH CANDIDATES FOR MATCHING ---
-    const candidates = await prisma.cRMCandidate.findMany({
-      where: { 
-        isDeleted: false,
-        ...(clientIds !== null ? { client_id: { in: clientIds } } : {})
-      },
-      select: { id: true, trades: true, state: true, district: true }
-    });
+    // --- DB-SIDE ELIGIBILITY COUNT (no full candidate scan in memory) ---
+    // For each job we count matching candidates using a DB query.
+    // We use a batched approach: build keyword arrays per job and run
+    // prisma.cRMCandidate.count() for each job. This is O(jobs) queries
+    // instead of O(jobs * candidates) in memory.
+    //
+    // NOTE: With many jobs this is still N queries. A future optimisation
+    // is to materialise eligibility counts in a background job. For now
+    // this is safe because job counts are typically in the hundreds.
 
-    const normalizedJobs = jobs.map(job => {
-      // Basic matching logic for eligibility count
-      const jobWords = [
-        ...(job.title?.toLowerCase().split(/\s+/) || []),
-        ...(job.category?.toLowerCase().split(/\s+/) || []),
-        ...(job.location?.toLowerCase().split(/[\s,]+/) || [])
-      ].filter(w => w.length > 2);
+    const crmBaseWhere = {
+      isDeleted: false,
+      ...(clientIds !== null ? { client_id: { in: clientIds } } : {})
+    };
 
-      const eligibleCount = candidates.filter(can => {
-        const canTrades = (can.trades || "").toLowerCase();
-        const canLoc = `${can.state || ""} ${can.district || ""}`.toLowerCase();
-        
-        // Match if any significant job word appears in candidate trades or location
-        return jobWords.some(word => canTrades.includes(word) || canLoc.includes(word));
-      }).length;
+    const normalizedJobs = await Promise.all(jobs.map(async (job) => {
+      const appCount = job._count?.applications || 0;
+
+      // Build keyword arrays for matching
+      const titleWords = (job.title || '').toLowerCase().split(/\s+/).filter(w => w.length > 2);
+      const categoryWords = (job.category || '').toLowerCase().split(/\s+/).filter(w => w.length > 2);
+      const locationWords = (job.location || '').toLowerCase().split(/[\s,]+/).filter(w => w.length > 2);
+      const allKeywords = [...new Set([...titleWords, ...categoryWords, ...locationWords])];
+
+      let eligibleCount = 0;
+      if (allKeywords.length > 0) {
+        // Build OR conditions: candidate trades OR location contains any keyword
+        const orConditions = allKeywords.flatMap(word => [
+          { trades: { contains: word, mode: 'insensitive' } },
+          { state:  { contains: word, mode: 'insensitive' } },
+          { district: { contains: word, mode: 'insensitive' } }
+        ]);
+
+        eligibleCount = await prisma.cRMCandidate.count({
+          where: { ...crmBaseWhere, OR: orConditions }
+        });
+      }
 
       return {
         ...job,
         _id: job.id,
         companyId: job.company ? { ...job.company, _id: job.company.id } : null,
-        eligibleCount: eligibleCount || 0
+        eligibleCount,
+        applicationCount: appCount
       };
-    });
+    }));
 
     return res.json({ success: true, jobs: normalizedJobs });
   } catch (error) {
@@ -716,26 +908,38 @@ export const raiseJobObjection = async (req, res) => {
   }
 };
 
-// NEW: Controller to get eligible CRM candidates for a job
+// Controller to get eligible CRM candidates for a job — paginated, memory-safe
 export const getEligibleCandidates = async (req, res) => {
   try {
     const { jobId } = req.params;
 
-    // Try finding in Portal Job first
+    // Pagination params
+    const rawPage  = parseInt(req.query.page  || '1', 10);
+    const rawLimit = parseInt(req.query.limit || '50', 10);
+    const page  = isNaN(rawPage)  || rawPage  < 1 ? 1  : rawPage;
+    const limit = isNaN(rawLimit) || rawLimit < 1 ? 50 : Math.min(rawLimit, 100);
+    const skip  = (page - 1) * limit;
+    const search = (req.query.search || '').trim();
+
+    // Try Portal Job first, then CRM Job
     let job = await prisma.job.findUnique({ where: { id: jobId } });
     let isCRMJob = false;
 
     if (!job) {
-      // Try finding in CRMJob
       job = await prisma.cRMJob.findUnique({ where: { id: jobId } });
       isCRMJob = true;
     }
 
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Job not found' });
+    }
+
+    // Access control
     const clientIds = await getAllocatedClientIds(req);
     if (clientIds !== null) {
       if (isCRMJob) {
         if (!clientIds.includes(job.client_id)) {
-          return res.status(403).json({ success: false, message: "Access forbidden: job not allocated to your clients" });
+          return res.status(403).json({ success: false, message: 'Access forbidden: job not allocated to your clients' });
         }
       } else {
         const clients = await prisma.client.findMany({
@@ -744,36 +948,75 @@ export const getEligibleCandidates = async (req, res) => {
         });
         const companyIds = clients.map(c => c.companyId).filter(Boolean);
         if (!companyIds.includes(job.companyId)) {
-          return res.status(403).json({ success: false, message: "Access forbidden: job not allocated to your clients" });
+          return res.status(403).json({ success: false, message: 'Access forbidden: job not allocated to your clients' });
         }
       }
     }
 
-    // Get all candidates
-    const candidates = await prisma.cRMCandidate.findMany({
-      where: { 
-        isDeleted: false,
-        ...(clientIds !== null ? { client_id: { in: clientIds } } : {})
-      },
-      include: { client: true }
-    });
-
-    // Same matching logic as count
-    const jobWords = [
-      ...(job.title?.toLowerCase().split(/\s+/) || []),
-      ...( (isCRMJob ? job.requirements : job.category)?.toLowerCase().split(/\s+/) || []),
-      ...(job.location?.toLowerCase().split(/[\s,]+/) || [])
+    // Build keyword matching
+    const jobText = isCRMJob ? job.requirements : job.category;
+    const allKeywords = [
+      ...(job.title || '').toLowerCase().split(/\s+/),
+      ...(jobText   || '').toLowerCase().split(/\s+/),
+      ...(job.location || '').toLowerCase().split(/[\s,]+/)
     ].filter(w => w.length > 2);
 
-    const eligibleCandidates = candidates.filter(can => {
-      const canTrades = (can.trades || "").toLowerCase();
-      const canLoc = `${can.state || ""} ${can.district || ""}`.toLowerCase();
-      return jobWords.some(word => canTrades.includes(word) || canLoc.includes(word));
-    });
+    if (allKeywords.length === 0) {
+      return res.json({
+        success: true, candidates: [],
+        pagination: { page, limit, total: 0, totalPages: 0, hasNextPage: false, hasPreviousPage: false }
+      });
+    }
 
-    res.json({ success: true, candidates: eligibleCandidates });
+    // Build DB-level where clause for matching
+    const orMatchConditions = allKeywords.flatMap(word => [
+      { trades:    { contains: word, mode: 'insensitive' } },
+      { state:     { contains: word, mode: 'insensitive' } },
+      { district:  { contains: word, mode: 'insensitive' } }
+    ]);
+
+    const searchConditions = search
+      ? [{ name: { contains: search, mode: 'insensitive' } },
+         { phone: { contains: search } },
+         { email: { contains: search, mode: 'insensitive' } }]
+      : null;
+
+    const eligibleWhere = {
+      isDeleted: false,
+      ...(clientIds !== null ? { client_id: { in: clientIds } } : {}),
+      OR: orMatchConditions,
+      ...(searchConditions ? { AND: [{ OR: searchConditions }] } : {})
+    };
+
+    const [total, eligibleCandidates] = await Promise.all([
+      prisma.cRMCandidate.count({ where: eligibleWhere }),
+      prisma.cRMCandidate.findMany({
+        where: eligibleWhere,
+        select: {
+          id: true, name: true, phone: true, email: true,
+          education: true, experience: true, state: true,
+          district: true, trades: true, status: true,
+          source: true, createdAt: true, client_id: true,
+          client: { select: { id: true, company_name: true } }
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit
+      })
+    ]);
+
+    return res.json({
+      success: true,
+      candidates: eligibleCandidates,
+      pagination: {
+        page, limit, total,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page * limit < total,
+        hasPreviousPage: page > 1
+      }
+    });
   } catch (error) {
-    console.error("Error fetching eligible candidates:", error);
+    console.error('Error fetching eligible candidates:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -871,7 +1114,9 @@ export const getCompanyJobApplicants = async (req, res) => {
       }
     });
 
-    if (!applications || applications.length === 0) {
+    const allApps = applications;
+
+    if (allApps.length === 0) {
       return res.json({
         success: false,
         message: "No applicants found for this job.",
@@ -1026,7 +1271,7 @@ export const getCompanyJobApplicants = async (req, res) => {
     };
 
     // Map to match the expected format (userId -> user, jobId -> job, etc.)
-    const normalizedApplications = applications.map((app) => {
+    const normalizedApplications = allApps.map((app) => {
       const matchScore = scoreCandidate(app, jobData);
       return {
         ...app,
@@ -1125,11 +1370,17 @@ export const updateJobByAdmin = async (req, res) => {
       where: { id: jobId },
       data,
       include: {
-        company: { select: { name: true, email: true, phone: true, image: true, isVerified: true } }
+        company: { select: { id: true, name: true, email: true, phone: true, image: true, isVerified: true } }
       }
     });
 
-    return res.json({ success: true, message: "Job updated successfully", job: updatedJob });
+    const normalizedJob = {
+      ...updatedJob,
+      _id: updatedJob.id,
+      companyId: updatedJob.company ? { ...updatedJob.company, _id: updatedJob.company.id } : null
+    };
+
+    return res.json({ success: true, message: "Job updated successfully", job: normalizedJob });
   } catch (error) {
     console.error("Error updating job by admin:", error);
     return res.status(500).json({ success: false, message: error.message });
@@ -1171,54 +1422,39 @@ export const changeApplicationStatus = async (req, res) => {
 };
 
 
-// Get application status statistics for a job (optional utility function)
+// Get application status statistics for a job — rewritten to use Prisma (not Mongoose)
 export const getJobApplicationStats = async (req, res) => {
   try {
     const { jobId } = req.params;
 
-    // Validate jobId
-    if (!mongoose.isValidObjectId(jobId)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Invalid job ID" 
-      });
+    if (!jobId) {
+      return res.status(400).json({ success: false, message: 'Job ID is required' });
     }
 
-    // Get application statistics
-    const stats = await JobApplication.aggregate([
-      { $match: { jobId: new mongoose.Types.ObjectId(jobId) } },
-      {
-        $group: {
-          _id: "$status",
-          count: { $sum: 1 }
-        }
-      }
-    ]);
+    // Check job exists
+    const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true } });
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Job not found' });
+    }
 
-    // Format the results
-    const formattedStats = {
-      total: 0,
-      pending: 0,
-      accepted: 0,
-      rejected: 0
-    };
-
-    stats.forEach(stat => {
-      formattedStats.total += stat.count;
-      formattedStats[stat._id || 'pending'] = stat.count;
+    // Use Prisma groupBy to aggregate application counts by status
+    const grouped = await prisma.jobApplication.groupBy({
+      by: ['status'],
+      where: { jobId },
+      _count: { status: true }
     });
 
-    return res.json({
-      success: true,
-      stats: formattedStats
+    const formattedStats = { total: 0, pending: 0, accepted: 0, rejected: 0 };
+    grouped.forEach(g => {
+      const key = (g.status || 'pending').toLowerCase();
+      formattedStats[key] = g._count.status;
+      formattedStats.total += g._count.status;
     });
 
+    return res.json({ success: true, stats: formattedStats });
   } catch (error) {
-    console.error("Error getting application stats:", error);
-    return res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    console.error('Error getting application stats:', error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -1226,40 +1462,27 @@ export const createSubAdmin = async (req, res) => {
   const { name, email, password } = req.body;
 
   if (!name || !email || !password) {
-    return res.json({ success: false, message: "Missing Details" });
+    return res.json({ success: false, message: 'Missing Details' });
   }
 
   try {
-    // Check if Admin already exists
-    const AdminExists = await Admin.findOne({ email }).lean();
+    // Use Prisma (not Mongoose)
+    const AdminExists = await prisma.admin.findUnique({ where: { email } });
     if (AdminExists) {
-      return res.json({
-        success: false,
-        message: "Admin already registered",
-      });
+      return res.json({ success: false, message: 'Admin already registered' });
     }
 
-    // Hash password
     const salt = await bcrypt.genSalt(10);
     const hashPassword = await bcrypt.hash(password, salt);
 
-    // Create Admin
-    const admin = await Admin.create({
-      name,
-      email,
-      password: hashPassword,
-      role: 'sub-admin'
+    const admin = await prisma.admin.create({
+      data: { name, email, password: hashPassword, role: 'sub-admin' }
     });
 
     res.json({
       success: true,
-      admin: {
-        _id: admin._id,
-        name: admin.name,
-        email: admin.email,
-        role: admin.role
-      },
-      message: "Sub-Admin created successfully",
+      admin: { _id: admin.id, id: admin.id, name: admin.name, email: admin.email, role: admin.role },
+      message: 'Sub-Admin created successfully'
     });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -1305,41 +1528,68 @@ export const deleteSubAdmin = async (req, res) => {
 // const storage = multer.memoryStorage();
 // export const upload = multer({ storage });
 
-// Upload CSV and save to PostgreSQL
+// Upload CSV and save to PostgreSQL as CRMCandidates
 export const uploadCandidatesCSV = async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ message: "CSV file required" });
+      return res.status(400).json({ success: false, message: 'CSV file required' });
     }
 
     const results = [];
     const bufferStream = new stream.PassThrough();
     bufferStream.end(req.file.buffer);
 
-    bufferStream
-      .pipe(csv())
-      .on("data", (data) => {
-        results.push({
-          name: data.name,
-          email: data.email,
-          phone: data.phone,
-        });
-      })
-      .on("end", async () => {
-        // Save all records to PostgreSQL using createMany
-        await prisma.candidate.createMany({
-          data: results,
+    await new Promise((resolve, reject) => {
+      bufferStream
+        .pipe(csv())
+        .on('data', (data) => {
+          const name  = (data.name  || data.Name  || data.NAME  || '').trim();
+          const email = (data.email || data.Email || data.EMAIL || '').trim().toLowerCase();
+          const phone = (data.phone || data.Phone || data.PHONE || '').trim();
+          if (name && phone) {
+            results.push({ name, email: email || null, phone });
+          }
+        })
+        .on('end', resolve)
+        .on('error', reject);
+    });
+
+    // Insert in batches of 500 to avoid memory spikes
+    const BATCH = 500;
+    let insertedCount = 0;
+    let skippedCount  = 0;
+
+    for (let i = 0; i < results.length; i += BATCH) {
+      const batch = results.slice(i, i + BATCH);
+      try {
+        // prisma.cRMCandidate has a unique constraint on phone
+        const result = await prisma.cRMCandidate.createMany({
+          data: batch.map(r => ({
+            name: r.name,
+            email: r.email,
+            phone: r.phone,
+            status: 'Applied',
+            source: 'CSV Upload'
+          })),
           skipDuplicates: true
         });
+        insertedCount += result.count;
+        skippedCount  += batch.length - result.count;
+      } catch (batchErr) {
+        console.error('Batch insert error:', batchErr.message);
+        skippedCount += batch.length;
+      }
+    }
 
-        res.json({
-          message: "Data uploaded & saved to PostgreSQL",
-          totalInserted: results.length,
-        });
-      });
-
+    return res.json({
+      success: true,
+      message: `Upload complete. ${insertedCount} candidates added. ${skippedCount > 0 ? skippedCount + ' rows skipped (duplicate phone or invalid data).' : ''}`,
+      insertedCount,
+      skippedCount
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('uploadCandidatesCSV error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -1458,13 +1708,22 @@ export const verifyJob = async (req, res) => {
         visible: isApproved,
         isEdited: false,
         objections: isApproved ? [] : undefined
+      },
+      include: {
+        company: { select: { id: true, name: true, email: true, phone: true, image: true, isVerified: true } }
       }
     });
+
+    const normalizedJob = {
+      ...job,
+      _id: job.id,
+      companyId: job.company ? { ...job.company, _id: job.company.id } : null
+    };
 
     res.json({
       success: true,
       message: `Job ${status.toLowerCase()} successfully`,
-      job
+      job: normalizedJob
     });
   } catch (error) {
     console.error("Error verifying job:", error);

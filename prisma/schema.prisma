@@ -46,13 +46,13 @@ model Company {
   country            String?
   createdAt          DateTime         @default(now())
   description        String?
+  industry           String?
   isTempPassword     Boolean          @default(false)
+  pendingEmailChange String?
+  pendingNameChange  String?
   state              String?
   updatedAt          DateTime         @default(now()) @updatedAt
   website            String?
-  pendingEmailChange String?
-  pendingNameChange  String?
-  industry           String?
   campaigns          Campaign[]
   crmClient          Client?
   staff              CompanyStaff[]
@@ -89,8 +89,6 @@ model Job {
   objections            Json?
   objectionsTrack       Json?
   isEdited              Boolean          @default(false)
-  jobId                 Int              @unique @default(autoincrement())
-  status                String           @default("Pending Admin Verification")
   benefits              Json?
   educationRequirements Json?
   experienceOption      String?
@@ -99,6 +97,8 @@ model Job {
   hrContact             Json?
   immediateJoining      Boolean?
   interviewProcess      Json?
+  jobId                 Int              @unique @default(autoincrement())
+  jobType               String?
   joiningWithin         String?
   languages             Json?
   maxAge                Int?
@@ -109,9 +109,9 @@ model Job {
   salaryBreakdown       Json?
   screeningQuestions    Json?
   shiftDetails          Json?
+  status                String           @default("Pending Admin Verification")
   vacancies             Int?
   workLocationDetails   Json?
-  jobType               String?
   crmJobs               CRMJob[]
   company               Company          @relation(fields: [companyId], references: [id])
   admin                 Admin?           @relation(fields: [createdBy], references: [id])
@@ -170,6 +170,10 @@ model UserProfile {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @default(now()) @updatedAt
   user             User      @relation(fields: [userId], references: [id])
+
+  @@index([phone])
+  @@index([createdAt])
+  @@index([email])
 }
 
 model Client {
@@ -204,11 +208,7 @@ model CRMCandidate {
   experience            String?
   state                 String?
   district              String?
-  city                  String?
-  currentIndustry       String?
-  preferredLocation     String?
-  interestStatus        String?
-  trades                String?             @db.Text
+  trades                String?
   dob                   String?
   gender                String?
   resume_url            String?
@@ -224,17 +224,21 @@ model CRMCandidate {
   updatedAt             DateTime            @updatedAt
   aadhaarAvailable      Boolean             @default(false)
   bankAccountAvailable  Boolean             @default(false)
+  city                  String?
+  currentIndustry       String?
+  followUpDate          String?
+  followUpNotes         String?
+  followUpTime          String?
+  interestStatus        String?
   joiningAvailability   String?
   matchScore            Int?
   panAvailable          Boolean             @default(false)
+  preferredLocation     String?
   recommendationStatus  String?
   relocationWillingness String?
   salaryExpectation     String?
   shiftReadiness        String?
   userId                String?
-  followUpDate          String?
-  followUpNotes         String?
-  followUpTime          String?
   aiScreening           AIScreening?
   client                Client?             @relation(fields: [client_id], references: [id])
   user                  User?               @relation(fields: [userId], references: [id])

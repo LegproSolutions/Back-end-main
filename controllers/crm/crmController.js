@@ -19,7 +19,7 @@ const logActivity = async (action, entityType, entityId, userId, details) => {
 
 export const getCandidates = async (req, res) => {
   try {
-    const { page = 1, limit = 100, status, client_id, jobId, assigned_recruiter, search, states, districts, education, trades, genders } = req.query;
+    const { page = 1, limit = 100, status, client_id, jobId, assigned_recruiter, search, states, districts, education, trades, genders, sources } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
     const take = Number(limit);
 
@@ -55,20 +55,25 @@ export const getCandidates = async (req, res) => {
     if (states) where.state = { in: states.split(',') };
     if (districts) where.district = { in: districts.split(',') };
     if (genders) where.gender = { in: genders.split(',') };
+    if (sources) where.source = { in: sources.split(',') };
 
     if (education) {
       const eduList = education.split(',');
-      where.OR = [
-        ...(where.OR || []),
-        ...eduList.map(edu => ({ education: { contains: edu, mode: 'insensitive' } }))
+      where.AND = [
+        ...(where.AND || []),
+        {
+          OR: eduList.map(edu => ({ education: { contains: edu, mode: 'insensitive' } }))
+        }
       ];
     }
 
     if (trades) {
       const tradeList = trades.split(',');
-      where.OR = [
-        ...(where.OR || []),
-        ...tradeList.map(t => ({ trades: { contains: t, mode: 'insensitive' } }))
+      where.AND = [
+        ...(where.AND || []),
+        {
+          OR: tradeList.map(t => ({ trades: { contains: t, mode: 'insensitive' } }))
+        }
       ];
     }
 
@@ -252,8 +257,28 @@ export const bulkCandidateImport = async (req, res) => {
     let skipped = 0;
     const assignedBy = req.admin?.id || req.staff?.id || "system";
 
-    for (const data of candidates) {
-      try {
+    // Fetch new_lead stage once if clientId is provided
+    let stageId = null;
+    if (clientId) {
+      let stage = await prisma.pipelineStage.findUnique({ where: { stage_name: 'new_lead' } });
+      if (!stage) stage = await prisma.pipelineStage.create({ data: { stage_name: 'new_lead' } });
+      stageId = stage.id;
+    }
+
+    // Keep track of imported phone numbers and emails to avoid duplicates in the same import session
+    const importedPhones = new Set();
+    const importedEmails = new Set();
+
+    const chunkSize = 1000;
+    for (let i = 0; i < candidates.length; i += chunkSize) {
+      const chunk = candidates.slice(i, i + chunkSize);
+
+      // Pre-process chunk to filter out bad rows and self-duplicates
+      const processedChunk = [];
+      const chunkPhones = [];
+      const chunkEmails = [];
+
+      for (const data of chunk) {
         const phone = data.phone || data.Phone || data.mobile || data.Mobile || data['Mobile Number'] || data['mobile number'];
         if (!phone) {
           skipped++;
@@ -268,85 +293,115 @@ export const bulkCandidateImport = async (req, res) => {
 
         const email = data.email || data.Email || data.EmailAddress || data['Email Address'] || null;
 
-        const existing = await prisma.cRMCandidate.findFirst({
-          where: {
-            OR: [
-              { phone: phoneStr },
-              ...(email ? [{ email }] : [])
-            ]
-          }
-        });
-
-        if (existing) {
+        if (importedPhones.has(phoneStr) || (email && importedEmails.has(email))) {
           skipped++;
           continue;
         }
 
-        const newCandidate = await prisma.cRMCandidate.create({
-          data: {
-            name: data.name || data.Name || data.fullName || data.FullName || data.Fullname || data['Full Name'] || data['full name'] || data['Candidate Name'] || data['candidate name'] || data.fullname || 'Unknown',
-            email: email,
-            phone: phoneStr,
-            state: data.state || data.State || data.Location || data.location || null,
-            district: data.district || data.District || null,
-            education: data.education || data.Education || null,
-            trades: data.trades || data.Trades || data.Trade || null,
-            experience: data.experience || data.Experience || null,
-            gender: data.gender || data.Gender || null,
-            dob: (() => {
-              const val = data.dob || data.Dob;
-              if (!val) return null;
-              const num = Number(val);
-              if (!isNaN(num) && num > 10000 && num < 60000) {
-                const date = new Date(Math.round((num - 25569) * 86400 * 1000));
-                const day = String(date.getDate()).padStart(2, '0');
-                const month = String(date.getMonth() + 1).padStart(2, '0');
-                const year = date.getFullYear();
-                return `${day}-${month}-${year}`;
-              }
-              return String(val);
-            })(),
-            source: data.source || data.Source || 'Bulk Import',
-            status: 'new_lead',
-            createdBy: req.admin?.id || req.staff?.id,
-            assigned_recruiter: recruiterId || null,
-            client_id: clientId || null,
-            resume_url: data.resumeLink || data.resume_url || data['Resume Link'] || null
-          },
-        });
+        processedChunk.push({ data, phoneStr, email });
+        chunkPhones.push(phoneStr);
+        if (email) chunkEmails.push(email);
+      }
 
-        if (recruiterId) {
-          // Log assignment history
-          await prisma.assignmentHistory.create({
-            data: {
-              assignedBy,
-              assignedTo: recruiterId,
-              previousOwner: null,
-              currentOwner: recruiterId,
-              candidateId: newCandidate.id,
-              clientId: clientId || null,
-              jobId: jobId || null
+      if (processedChunk.length === 0) continue;
+
+      // Query database for existing candidates matching this chunk's phones/emails
+      const existingInDb = await prisma.cRMCandidate.findMany({
+        where: {
+          OR: [
+            { phone: { in: chunkPhones } },
+            { email: { in: chunkEmails } }
+          ]
+        },
+        select: { phone: true, email: true }
+      });
+
+      const existingDbPhones = new Set(existingInDb.map(c => c.phone));
+      const existingDbEmails = new Set(existingInDb.map(c => c.email).filter(Boolean));
+
+      // Filter chunk to only candidates not in database
+      const candidatesToInsert = [];
+      for (const item of processedChunk) {
+        if (existingDbPhones.has(item.phoneStr) || (item.email && existingDbEmails.has(item.email))) {
+          skipped++;
+          continue;
+        }
+        candidatesToInsert.push(item);
+        importedPhones.add(item.phoneStr);
+        if (item.email) importedEmails.add(item.email);
+      }
+
+      // Process insertions in parallel sub-batches to be fast without exhausting connections
+      const subChunkSize = 30;
+      for (let j = 0; j < candidatesToInsert.length; j += subChunkSize) {
+        const subChunk = candidatesToInsert.slice(j, j + subChunkSize);
+
+        await Promise.all(subChunk.map(async (item) => {
+          const { data, phoneStr, email } = item;
+          try {
+            const newCandidate = await prisma.cRMCandidate.create({
+              data: {
+                name: data.name || data.Name || data.fullName || data.FullName || data.Fullname || data['Full Name'] || data['full name'] || data['Candidate Name'] || data['candidate name'] || data.fullname || 'Unknown',
+                email: email,
+                phone: phoneStr,
+                state: data.state || data.State || data.Location || data.location || null,
+                district: data.district || data.District || null,
+                education: data.education || data.Education || null,
+                trades: data.trades || data.Trades || data.Trade || null,
+                experience: data.experience || data.Experience || null,
+                gender: data.gender || data.Gender || null,
+                dob: (() => {
+                  const val = data.dob || data.Dob;
+                  if (!val) return null;
+                  const num = Number(val);
+                  if (!isNaN(num) && num > 10000 && num < 60000) {
+                    const date = new Date(Math.round((num - 25569) * 86400 * 1000));
+                    const day = String(date.getDate()).padStart(2, '0');
+                    const month = String(date.getMonth() + 1).padStart(2, '0');
+                    const year = date.getFullYear();
+                    return `${day}-${month}-${year}`;
+                  }
+                  return String(val);
+                })(),
+                source: data.source || data.Source || 'Bulk Import',
+                status: 'new_lead',
+                createdBy: req.admin?.id || req.staff?.id,
+                assigned_recruiter: recruiterId || null,
+                client_id: clientId || null,
+                resume_url: data.resumeLink || data.resume_url || data['Resume Link'] || null
+              },
+            });
+
+            if (recruiterId) {
+              await prisma.assignmentHistory.create({
+                data: {
+                  assignedBy,
+                  assignedTo: recruiterId,
+                  previousOwner: null,
+                  currentOwner: recruiterId,
+                  candidateId: newCandidate.id,
+                  clientId: clientId || null,
+                  jobId: jobId || null
+                }
+              });
             }
-          });
-        }
 
-        if (clientId) {
-          let stage = await prisma.pipelineStage.findUnique({ where: { stage_name: 'new_lead' } });
-          if (!stage) stage = await prisma.pipelineStage.create({ data: { stage_name: 'new_lead' } });
+            if (clientId && stageId) {
+              await prisma.candidatePipeline.create({
+                data: {
+                  candidate_id: newCandidate.id,
+                  client_id: clientId,
+                  stage_id: stageId,
+                },
+              });
+            }
 
-          await prisma.candidatePipeline.create({
-            data: {
-              candidate_id: newCandidate.id,
-              client_id: clientId,
-              stage_id: stage.id,
-            },
-          });
-        }
-
-        count++;
-      } catch (err) {
-        console.error('Error importing candidate:', err);
-        skipped++;
+            count++;
+          } catch (err) {
+            console.error('Error importing candidate:', err);
+            skipped++;
+          }
+        }));
       }
     }
 
@@ -369,10 +424,38 @@ export const getClients = async (req, res) => {
     const clients = await prisma.client.findMany({
       where,
       include: {
-        _count: { select: { candidates: true, pipelines: true } },
+        _count: { select: { pipelines: true } },
       },
     });
-    res.json({ success: true, data: clients });
+
+    const clientsWithCounts = [];
+    for (const client of clients) {
+      const [candidatesCount, hiresCount] = await Promise.all([
+        prisma.cRMCandidate.count({
+          where: {
+            client_id: client.id,
+            isDeleted: false
+          }
+        }),
+        prisma.cRMCandidate.count({
+          where: {
+            client_id: client.id,
+            status: "Joined",
+            isDeleted: false
+          }
+        })
+      ]);
+      clientsWithCounts.push({
+        ...client,
+        _count: {
+          ...client._count,
+          candidates: candidatesCount,
+          hires: hiresCount
+        }
+      });
+    }
+
+    res.json({ success: true, data: clientsWithCounts });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -596,6 +679,79 @@ export const getCRMStats = async (req, res) => {
       _count: { education: true },
     });
 
+    const normalizeEducation = (edu) => {
+      if (!edu) return "Others";
+      const clean = edu.trim();
+      const lower = clean.toLowerCase().replace(/[\.\s]/g, "");
+      
+      if (lower === "10th" || lower === "matric" || lower === "matriculation" || lower === "ssc" || lower === "secondary") {
+        return "10th";
+      }
+      if (lower === "12th" || lower === "hsc" || lower === "intermediate" || lower === "highersecondary") {
+        return "12th";
+      }
+      if (lower === "iti") {
+        return "ITI";
+      }
+      if (lower === "diploma" || lower === "polytechnic" || lower === "polytechnicdiploma") {
+        return "Diploma";
+      }
+      if (
+        lower === "graduate" || 
+        lower === "graduation" || 
+        lower === "gradute" || 
+        lower === "ba" || 
+        lower === "bsc" || 
+        lower === "bcom" || 
+        lower === "btech" || 
+        lower === "bba" || 
+        lower === "bca"
+      ) {
+        return "Graduation";
+      }
+      if (
+        lower === "postgraduation" || 
+        lower === "postgraduate" || 
+        lower === "ma" || 
+        lower === "msc" || 
+        lower === "mcom" || 
+        lower === "mtech" || 
+        lower === "mba" || 
+        lower === "mca" || 
+        lower === "pg"
+      ) {
+        return "Post Graduation";
+      }
+      return clean;
+    };
+
+    const educationOrder = [
+      "10th",
+      "12th",
+      "ITI",
+      "Diploma",
+      "Graduation",
+      "Post Graduation",
+      "Others"
+    ];
+
+    const eduMap = {};
+    educationStats.forEach(s => {
+      const norm = normalizeEducation(s.education);
+      eduMap[norm] = (eduMap[norm] || 0) + s._count.education;
+    });
+
+    const formattedEducation = [];
+    educationOrder.forEach(name => {
+      if (eduMap[name] !== undefined) {
+        formattedEducation.push({ name, count: eduMap[name] });
+        delete eduMap[name];
+      }
+    });
+    Object.keys(eduMap).forEach(name => {
+      formattedEducation.push({ name, count: eduMap[name] });
+    });
+
     const stateStats = await prisma.cRMCandidate.groupBy({
       by: ['state'],
       where,
@@ -616,10 +772,73 @@ export const getCRMStats = async (req, res) => {
 
     // Added: Conversion Rate Calculations
     const joinedCandidates = await prisma.cRMCandidate.count({
-      where: { ...where, status: 'joined' }
+      where: { ...where, status: 'Joined' }
     });
 
     const conversionRate = candidates > 0 ? Math.round((joinedCandidates / candidates) * 100) : 0;
+
+    // Calculate weekly trends (last 7 days from the latest candidate's date or today)
+    let referenceDate = new Date();
+    const maxCandidate = await prisma.cRMCandidate.findFirst({
+      where,
+      orderBy: { createdAt: "desc" }
+    });
+    if (maxCandidate) {
+      referenceDate = new Date(maxCandidate.createdAt);
+    }
+
+    const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const last7Days = [];
+    const weeklyDataMap = {};
+
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(referenceDate);
+      d.setDate(d.getDate() - i);
+      const dayName = daysOfWeek[d.getDay()];
+      const dateString = d.toDateString();
+      last7Days.push({ key: dateString, day: dayName });
+      weeklyDataMap[dateString] = { day: dayName, applications: 0, hires: 0 };
+    }
+
+    const sevenDaysAgo = new Date(referenceDate);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+
+    const candidatesLast7Days = await prisma.cRMCandidate.findMany({
+      where: {
+        ...where,
+        createdAt: { 
+          gte: sevenDaysAgo,
+          lte: new Date(referenceDate.getTime() + 24 * 60 * 60 * 1000)
+        }
+      },
+      select: { createdAt: true, status: true }
+    });
+
+    candidatesLast7Days.forEach(c => {
+      const dateStr = new Date(c.createdAt).toDateString();
+      if (weeklyDataMap[dateStr]) {
+        weeklyDataMap[dateStr].applications += 1;
+        if (c.status === "Joined") {
+          weeklyDataMap[dateStr].hires += 1;
+        }
+      }
+    });
+
+    const weeklyTrend = last7Days.map(item => weeklyDataMap[item.key]);
+
+    const recentActivities = await prisma.auditLog.findMany({
+      where: { 
+        companyId: req.companyId,
+        NOT: {
+          action: {
+            in: ["TEAM_MEMBER_CREATED", "TEAM_MEMBER_UPDATED"]
+          }
+        }
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10
+    });
 
     res.json({
       success: true,
@@ -630,9 +849,289 @@ export const getCRMStats = async (req, res) => {
         joinedCandidates,
         conversionRate,
         pipelineStats,
-        education: educationStats.map(s => ({ name: s.education || 'Others', count: s._count.education })),
+        weeklyTrend,
+        recentActivities,
+        education: formattedEducation,
         states: stateStats.map(s => ({ name: s.state || 'Unknown', count: s._count.state })),
       }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getCandidateRegistrationTrend = async (req, res) => {
+  try {
+    const { view = "weekly" } = req.query;
+    const clientIds = await getAllocatedClientIds(req);
+    const where = { isDeleted: false };
+    if (clientIds !== null) {
+      where.client_id = { in: clientIds };
+    }
+
+    const now = new Date();
+    let trendData = [];
+
+    if (view === "today") {
+      const todayStart = new Date(now);
+      todayStart.setHours(0, 0, 0, 0);
+      const todayEnd = new Date(now);
+      todayEnd.setHours(23, 59, 59, 999);
+
+      const candidates = await prisma.cRMCandidate.findMany({
+        where: {
+          ...where,
+          createdAt: {
+            gte: todayStart,
+            lte: todayEnd
+          }
+        },
+        select: { createdAt: true }
+      });
+
+      const hourlyBlocks = ["00:00", "02:00", "04:00", "06:00", "08:00", "10:00", "12:00", "14:00", "16:00", "18:00", "20:00", "22:00"];
+      const hourlyMap = {};
+      hourlyBlocks.forEach(b => hourlyMap[b] = 0);
+
+      candidates.forEach(c => {
+        const hour = new Date(c.createdAt).getHours();
+        const blockHour = Math.floor(hour / 2) * 2;
+        const blockStr = `${blockHour.toString().padStart(2, "0")}:00`;
+        if (hourlyMap[blockStr] !== undefined) {
+          hourlyMap[blockStr]++;
+        }
+      });
+
+      trendData = hourlyBlocks.map(b => ({
+        label: b,
+        count: hourlyMap[b]
+      }));
+
+    } else if (view === "custom") {
+      const { startDate, endDate } = req.query;
+      if (!startDate || !endDate) {
+        return res.status(400).json({ success: false, message: "startDate and endDate are required for custom view" });
+      }
+      const start = new Date(startDate);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+
+      const diffDays = Math.ceil((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+
+      const candidates = await prisma.cRMCandidate.findMany({
+        where: {
+          ...where,
+          createdAt: {
+            gte: start,
+            lte: end
+          }
+        },
+        select: { createdAt: true }
+      });
+
+      if (diffDays <= 1) {
+        const hourlyBlocks = ["00:00", "02:00", "04:00", "06:00", "08:00", "10:00", "12:00", "14:00", "16:00", "18:00", "20:00", "22:00"];
+        const hourlyMap = {};
+        hourlyBlocks.forEach(b => hourlyMap[b] = 0);
+
+        candidates.forEach(c => {
+          const hour = new Date(c.createdAt).getHours();
+          const blockHour = Math.floor(hour / 2) * 2;
+          const blockStr = `${blockHour.toString().padStart(2, "0")}:00`;
+          if (hourlyMap[blockStr] !== undefined) {
+            hourlyMap[blockStr]++;
+          }
+        });
+
+        trendData = hourlyBlocks.map(b => ({
+          label: b,
+          count: hourlyMap[b]
+        }));
+      } else {
+        const dailyMap = {};
+        const dates = [];
+        
+        for (let i = 0; i < diffDays; i++) {
+          const d = new Date(start);
+          d.setDate(d.getDate() + i);
+          const dateString = d.toDateString();
+          const label = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+          dates.push({ key: dateString, label });
+          dailyMap[dateString] = 0;
+        }
+
+        candidates.forEach(c => {
+          const dateStr = new Date(c.createdAt).toDateString();
+          if (dailyMap[dateStr] !== undefined) {
+            dailyMap[dateStr]++;
+          }
+        });
+
+        trendData = dates.map(d => ({
+          label: d.label,
+          count: dailyMap[d.key]
+        }));
+      }
+
+    } else if (view === "weekly") {
+      // Last 7 days
+      const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      const dailyMap = {};
+      const dates = [];
+      
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(now);
+        d.setDate(d.getDate() - i);
+        const dateString = d.toDateString();
+        const dayLabel = daysOfWeek[d.getDay()];
+        dates.push({ key: dateString, label: dayLabel });
+        dailyMap[dateString] = 0;
+      }
+
+      const since = new Date(now);
+      since.setDate(since.getDate() - 6);
+      since.setHours(0, 0, 0, 0);
+
+      const candidates = await prisma.cRMCandidate.findMany({
+        where: {
+          ...where,
+          createdAt: { gte: since }
+        },
+        select: { createdAt: true }
+      });
+
+      candidates.forEach(c => {
+        const dateStr = new Date(c.createdAt).toDateString();
+        if (dailyMap[dateStr] !== undefined) {
+          dailyMap[dateStr]++;
+        }
+      });
+
+      trendData = dates.map(d => ({
+        label: d.label,
+        count: dailyMap[d.key]
+      }));
+
+    } else if (view === "monthly") {
+      // Last 4 weeks (30 days)
+      const weeklyMap = { "Week 4": 0, "Week 3": 0, "Week 2": 0, "Week 1": 0 };
+      
+      const candidates = await prisma.cRMCandidate.findMany({
+        where: {
+          ...where,
+          createdAt: { gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) }
+        },
+        select: { createdAt: true }
+      });
+
+      candidates.forEach(c => {
+        const diffMs = now.getTime() - new Date(c.createdAt).getTime();
+        const diffDays = Math.floor(diffMs / (24 * 60 * 60 * 1000));
+        if (diffDays < 7) {
+          weeklyMap["Week 1"]++;
+        } else if (diffDays < 14) {
+          weeklyMap["Week 2"]++;
+        } else if (diffDays < 21) {
+          weeklyMap["Week 3"]++;
+        } else if (diffDays < 30) {
+          weeklyMap["Week 4"]++;
+        }
+      });
+
+      trendData = [
+        { label: "Week 4", count: weeklyMap["Week 4"] },
+        { label: "Week 3", count: weeklyMap["Week 3"] },
+        { label: "Week 2", count: weeklyMap["Week 2"] },
+        { label: "Week 1", count: weeklyMap["Week 1"] }
+      ];
+
+    } else if (view === "quarterly") {
+      // Last 3 months (quarterly)
+      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      const monthlyMap = {};
+      const labels = [];
+
+      for (let i = 2; i >= 0; i--) {
+        const d = new Date(now);
+        d.setMonth(d.getMonth() - i);
+        const key = `${d.getFullYear()}-${d.getMonth()}`;
+        const label = `${months[d.getMonth()]} ${d.getFullYear().toString().slice(-2)}`;
+        labels.push({ key, label });
+        monthlyMap[key] = 0;
+      }
+
+      const since = new Date(now);
+      since.setMonth(since.getMonth() - 2);
+      since.setDate(1);
+      since.setHours(0, 0, 0, 0);
+
+      const candidates = await prisma.cRMCandidate.findMany({
+        where: {
+          ...where,
+          createdAt: { gte: since }
+        },
+        select: { createdAt: true }
+      });
+
+      candidates.forEach(c => {
+        const dateObj = new Date(c.createdAt);
+        const key = `${dateObj.getFullYear()}-${dateObj.getMonth()}`;
+        if (monthlyMap[key] !== undefined) {
+          monthlyMap[key]++;
+        }
+      });
+
+      trendData = labels.map(l => ({
+        label: l.label,
+        count: monthlyMap[l.key]
+      }));
+
+    } else if (view === "yearly") {
+      // Last 12 months
+      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      const monthlyMap = {};
+      const labels = [];
+
+      for (let i = 11; i >= 0; i--) {
+        const d = new Date(now);
+        d.setMonth(d.getMonth() - i);
+        const key = `${d.getFullYear()}-${d.getMonth()}`;
+        const label = `${months[d.getMonth()]} ${d.getFullYear().toString().slice(-2)}`;
+        labels.push({ key, label });
+        monthlyMap[key] = 0;
+      }
+
+      const since = new Date(now);
+      since.setMonth(since.getMonth() - 11);
+      since.setDate(1);
+      since.setHours(0, 0, 0, 0);
+
+      const candidates = await prisma.cRMCandidate.findMany({
+        where: {
+          ...where,
+          createdAt: { gte: since }
+        },
+        select: { createdAt: true }
+      });
+
+      candidates.forEach(c => {
+        const dateObj = new Date(c.createdAt);
+        const key = `${dateObj.getFullYear()}-${dateObj.getMonth()}`;
+        if (monthlyMap[key] !== undefined) {
+          monthlyMap[key]++;
+        }
+      });
+
+      trendData = labels.map(l => ({
+        label: l.label,
+        count: monthlyMap[l.key]
+      }));
+    }
+
+    res.json({
+      success: true,
+      data: trendData
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

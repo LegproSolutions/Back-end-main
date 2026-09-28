@@ -14,6 +14,7 @@ import {
   getCRMJobs,
   getCRMStats,
   getPipelineByClient,
+  getCandidateRegistrationTrend,
 } from "../../controllers/crm/crmController.js";
 import {
   loginCompanyStaff,
@@ -90,8 +91,9 @@ crmRouter.get("/pipeline/client/:id", checkCrmPermission("application_view"), ge
 // Jobs
 crmRouter.get("/jobs", checkCrmPermission("job_view"), getCRMJobs);
 
-// Old Stats
+// Stats
 crmRouter.get("/stats", checkCrmPermission("dashboard_view"), getCRMStats);
+crmRouter.get("/stats/registration-trend", checkCrmPermission("dashboard_view"), getCandidateRegistrationTrend);
 
 // --- NEW MODULE 12: TEAM MANAGEMENT ---
 crmRouter.post("/team", checkCrmPermission("users_create"), createTeamMember);

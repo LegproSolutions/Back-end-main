@@ -30,7 +30,6 @@ export const getJobs = async (req, res) => {
     const skip = (pageNum - 1) * limitNum;
 
     const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - 31);
 
     const andConditions = [
       { visible: true },
@@ -294,7 +293,6 @@ export const getJobById = async (req, res) => {
     }
 
     const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - 31);
     if (new Date(job.deadline) < cutoffDate) {
       return res.json({
         success: false,

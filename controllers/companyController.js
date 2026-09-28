@@ -81,30 +81,62 @@ export const registerCompany = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    // Upload image to cloudinary
+    // Upload image to cloudinary or fallback to local uploads
     let imageUrl = "https://cdn.iconscout.com/icon/premium/png-256-thumb/building-icon-svg-download-png-1208046.png?f=webp&w=128";
-    
-    if (process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_KEY !== "your_api_key") {
+
+    if (imageFile) {
+      if (process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_KEY !== "your_api_key") {
         try {
-            const streamUpload = (buffer) => {
-                return new Promise((resolve, reject) => {
-                    const stream = cloudinary.uploader.upload_stream(
-                        { folder: "companies" },
-                        (error, result) => {
-                            if (error) reject(error);
-                            else resolve(result);
-                        }
-                    );
-                    streamifier.createReadStream(buffer).pipe(stream);
-                });
-            };
-            const uploadResult = await streamUpload(imageFile.buffer);
-            imageUrl = uploadResult.secure_url;
+          const streamUpload = (buffer) => {
+            return new Promise((resolve, reject) => {
+              const stream = cloudinary.uploader.upload_stream(
+                { folder: "companies" },
+                (error, result) => {
+                  if (error) reject(error);
+                  else resolve(result);
+                }
+              );
+              streamifier.createReadStream(buffer).pipe(stream);
+            });
+          };
+          const uploadResult = await streamUpload(imageFile.buffer);
+          imageUrl = uploadResult.secure_url;
         } catch (error) {
-            console.error("Cloudinary upload failed, using default image:", error.message);
+          console.error("Cloudinary upload failed, falling back to local storage:", error.message);
+          try {
+            const fs = await import('fs');
+            const path = await import('path');
+            const { fileURLToPath } = await import('url');
+            const __dirname = path.dirname(fileURLToPath(import.meta.url));
+            const uploadDir = path.join(__dirname, '../public/uploads');
+            if (!fs.existsSync(uploadDir)) {
+              fs.mkdirSync(uploadDir, { recursive: true });
+            }
+            const filename = `company_${Date.now()}_${imageFile.originalname.replace(/\s+/g, '_')}`;
+            fs.writeFileSync(path.join(uploadDir, filename), imageFile.buffer);
+            imageUrl = `${req.protocol}://${req.get('host')}/uploads/${filename}`;
+          } catch (localErr) {
+            console.error("Local upload fallback failed:", localErr);
+          }
         }
-    } else {
-        console.warn("Cloudinary not configured or using placeholder keys. Using default company image.");
+      } else {
+        console.warn("Cloudinary not configured. Uploading locally.");
+        try {
+          const fs = await import('fs');
+          const path = await import('path');
+          const { fileURLToPath } = await import('url');
+          const __dirname = path.dirname(fileURLToPath(import.meta.url));
+          const uploadDir = path.join(__dirname, '../public/uploads');
+          if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+          }
+          const filename = `company_${Date.now()}_${imageFile.originalname.replace(/\s+/g, '_')}`;
+          fs.writeFileSync(path.join(uploadDir, filename), imageFile.buffer);
+          imageUrl = `${req.protocol}://${req.get('host')}/uploads/${filename}`;
+        } catch (localErr) {
+          console.error("Local upload failed:", localErr);
+        }
+      }
     }
 
     const company = await prisma.company.create({
@@ -171,14 +203,10 @@ export const registerCompany = async (req, res) => {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
+    const { password: _, ...companyWithoutPassword } = company;
     res.status(201).json({
       success: true,
-      company: {
-        id: company.id,
-        name: company.name,
-        email: company.email,
-        image: company.image
-      },
+      company: companyWithoutPassword,
       message: "Company registered successfully. Please wait for admin verification."
     });
 
@@ -223,7 +251,7 @@ export const loginCompany = async (req, res) => {
     }
 
     if (!company.isVerified) {
-        return res.status(403).json({ success: false, message: "Your company account is not yet verified by the admin team." });
+      return res.status(403).json({ success: false, message: "Your company account is not yet verified by the admin team." });
     }
 
     const token = jwt.sign({ id: company.id }, process.env.JWT_SECRET, { expiresIn: '1d' });
@@ -235,14 +263,10 @@ export const loginCompany = async (req, res) => {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
+    const { password: _, ...companyWithoutPassword } = company;
     res.json({
       success: true,
-      company: {
-        id: company.id,
-        name: company.name,
-        email: company.email,
-        image: company.image
-      },
+      company: companyWithoutPassword,
       message: "Login successful"
     });
 
@@ -265,8 +289,8 @@ export const getCompanyData = async (req, res) => {
 // Post a new job
 export const postJob = async (req, res) => {
   try {
-    const { 
-      title, description, location, category, level, experience, salary, 
+    const {
+      title, description, location, category, level, experience, salary,
       openings, deadline, requirements, employmentType, qualification, jobType,
       companyDetails,
       educationRequirements, benefits, hrContact, shiftDetails, salaryBreakdown,
@@ -303,10 +327,10 @@ export const postJob = async (req, res) => {
           hrEmail: companyDetails?.hrEmail || req.company.email,
           hrPhone: companyDetails?.hrPhone || req.company.phone
         },
-        visible: false, 
+        visible: false,
         isVerified: false,
         status: "Pending Admin Verification",
-        
+
         // Advanced fields
         educationRequirements,
         benefits,
@@ -344,6 +368,17 @@ export const listCompanyJobs = async (req, res) => {
     const jobs = await prisma.job.findMany({
       where: { companyId },
       include: {
+        company: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            image: true,
+            isVerified: true,
+            havePremiumAccess: true
+          }
+        },
         _count: {
           select: { applications: true }
         }
@@ -358,7 +393,7 @@ export const listCompanyJobs = async (req, res) => {
         const deadlineDate = new Date(job.deadline);
         const cutoffDate = new Date();
         cutoffDate.setDate(cutoffDate.getDate() - 31);
-        
+
         if (deadlineDate < cutoffDate) {
           calculatedStatus = "Hidden";
         } else if (deadlineDate < now) {
@@ -367,16 +402,52 @@ export const listCompanyJobs = async (req, res) => {
           calculatedStatus = "Active";
         }
       }
-      
+
       return {
         ...job,
         _id: job.id,
+        companyId: job.company ? { ...job.company, _id: job.company.id } : null,
         status: calculatedStatus,
         applicants: job._count?.applications || 0
       };
     });
 
     res.json({ success: true, jobs: normalizedJobs });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Get all job applications for the logged-in company
+export const getCompanyAllApplications = async (req, res) => {
+  try {
+    const companyId = req.company.id;
+
+    const applications = await prisma.jobApplication.findMany({
+      where: { companyId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            image: true
+          }
+        },
+        job: {
+          select: {
+            id: true,
+            title: true
+          }
+        }
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
+
+    res.json({ success: true, applications });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -396,12 +467,12 @@ export const getCompanyJobApplicants = async (req, res) => {
       where: { jobId, companyId },
       include: {
         user: {
-          select: { 
-            id: true, 
-            name: true, 
-            email: true, 
-            phone: true, 
-            image: true, 
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            image: true,
             resume: true,
             profile: true
           }
@@ -427,26 +498,26 @@ export const getCompanyJobApplicants = async (req, res) => {
       if (job.educationRequirements && Array.isArray(job.educationRequirements) && job.educationRequirements.length > 0) {
         totalWeight += 25;
         let isEducatedMatched = false;
-        
+
         let candidateEdu = [];
         try {
           if (profile.education) {
-            candidateEdu = typeof profile.education === 'string' 
-              ? JSON.parse(profile.education) 
+            candidateEdu = typeof profile.education === 'string'
+              ? JSON.parse(profile.education)
               : profile.education;
           }
-        } catch (e) {}
+        } catch (e) { }
         if (!Array.isArray(candidateEdu)) {
           candidateEdu = [candidateEdu].filter(Boolean);
         }
 
         for (const reqBlock of job.educationRequirements) {
-          const matchedEdu = candidateEdu.find(edu => 
+          const matchedEdu = candidateEdu.find(edu =>
             edu.qualification?.toLowerCase() === reqBlock.qualification?.toLowerCase()
           );
           if (matchedEdu) {
             if (reqBlock.specializations && Array.isArray(reqBlock.specializations) && reqBlock.specializations.length > 0) {
-              const specMatched = reqBlock.specializations.some(spec => 
+              const specMatched = reqBlock.specializations.some(spec =>
                 (matchedEdu.specialization || matchedEdu.trade || matchedEdu.stream || "")
                   .toLowerCase().includes(spec.toLowerCase())
               );
@@ -474,7 +545,7 @@ export const getCompanyJobApplicants = async (req, res) => {
             parsedExp = typeof profile.experience === 'string'
               ? JSON.parse(profile.experience)
               : profile.experience;
-          } catch (e) {}
+          } catch (e) { }
           if (Array.isArray(parsedExp)) {
             candidateExpYears = parsedExp.reduce((sum, exp) => {
               const years = parseInt(exp.years || exp.experience || 0);
@@ -510,7 +581,7 @@ export const getCompanyJobApplicants = async (req, res) => {
           const ageDiffMs = Date.now() - dob.getTime();
           const ageDate = new Date(ageDiffMs);
           const age = Math.abs(ageDate.getUTCFullYear() - 1970);
-          
+
           const minAge = job.minAge !== null ? job.minAge : 0;
           const maxAge = job.maxAge !== null ? job.maxAge : 99;
           if (age >= minAge && age <= maxAge) score += 15;
@@ -527,9 +598,9 @@ export const getCompanyJobApplicants = async (req, res) => {
               ? JSON.parse(profile.languages)
               : profile.languages;
           }
-        } catch (e) {}
+        } catch (e) { }
         if (Array.isArray(candLanguages)) {
-          const matches = job.languages.filter(lang => 
+          const matches = job.languages.filter(lang =>
             candLanguages.some(candLang => candLang?.toLowerCase() === lang?.toLowerCase())
           );
           if (matches.length > 0) {
@@ -546,8 +617,8 @@ export const getCompanyJobApplicants = async (req, res) => {
           appData = typeof app.applicationData === 'string'
             ? JSON.parse(app.applicationData)
             : app.applicationData || {};
-        } catch (e) {}
-        
+        } catch (e) { }
+
         const screeningAnswers = appData.screeningAnswers || {};
         let correctAnswers = 0;
         for (const q of job.screeningQuestions) {
@@ -602,37 +673,37 @@ export const changeJobApplicationStatus = async (req, res) => {
 
 // Change interview status
 export const changeInterviewStatus = async (req, res) => {
-    try {
-      const { id, interviewStatus } = req.body;
-      const companyId = req.company.id;
-  
-      await prisma.jobApplication.update({
-        where: { id, companyId },
-        data: { interview: interviewStatus }
-      });
-  
-      res.json({ success: true, message: "Interview status updated successfully" });
-    } catch (error) {
-      res.status(500).json({ success: false, message: error.message });
-    }
-  };
-  
-  // Change onboarding status
-  export const changeOnboardingStatus = async (req, res) => {
-    try {
-      const { id, onboardingStatus } = req.body;
-      const companyId = req.company.id;
-  
-      await prisma.jobApplication.update({
-        where: { id, companyId },
-        data: { onboarding: onboardingStatus }
-      });
-  
-      res.json({ success: true, message: "Onboarding status updated successfully" });
-    } catch (error) {
-      res.status(500).json({ success: false, message: error.message });
-    }
-  };
+  try {
+    const { id, interviewStatus } = req.body;
+    const companyId = req.company.id;
+
+    await prisma.jobApplication.update({
+      where: { id, companyId },
+      data: { interview: interviewStatus }
+    });
+
+    res.json({ success: true, message: "Interview status updated successfully" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Change onboarding status
+export const changeOnboardingStatus = async (req, res) => {
+  try {
+    const { id, onboardingStatus } = req.body;
+    const companyId = req.company.id;
+
+    await prisma.jobApplication.update({
+      where: { id, companyId },
+      data: { onboarding: onboardingStatus }
+    });
+
+    res.json({ success: true, message: "Onboarding status updated successfully" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
 
 // Edit a job
 export const editJob = async (req, res) => {
@@ -644,8 +715,8 @@ export const editJob = async (req, res) => {
     const allowedFields = [
       "title", "description", "location", "category", "deadline", "level", "jobType",
       "experience", "salary", "openings", "requirements", "employmentType", "qualification",
-      "companyDetails", "educationRequirements", "benefits", "hrContact", "shiftDetails", 
-      "salaryBreakdown", "workLocationDetails", "genderPreference", "minAge", "maxAge", 
+      "companyDetails", "educationRequirements", "benefits", "hrContact", "shiftDetails",
+      "salaryBreakdown", "workLocationDetails", "genderPreference", "minAge", "maxAge",
       "experienceOption", "minExperience", "maxExperience", "languages", "requiredDocuments",
       "immediateJoining", "joiningWithin", "vacancies", "interviewProcess", "screeningQuestions"
     ];
@@ -701,6 +772,41 @@ export const deleteJob = async (req, res) => {
   }
 };
 
+// Re-post / Boost a job
+export const repostJob = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const companyId = req.company.id;
+
+    const existingJob = await prisma.job.findUnique({
+      where: { id: jobId, companyId }
+    });
+
+    if (!existingJob) {
+      return res.status(404).json({ success: false, message: "Job not found" });
+    }
+
+    const newDeadline = new Date();
+    newDeadline.setDate(newDeadline.getDate() + 30);
+
+    const job = await prisma.job.update({
+      where: { id: jobId, companyId },
+      data: {
+        date: new Date(),
+        deadline: newDeadline,
+        status: "Pending Admin Verification",
+        isVerified: false,
+        visible: false,
+        isEdited: true
+      }
+    });
+
+    res.json({ success: true, message: "Job re-posted and boosted successfully", job });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // Logout
 export const logoutCompany = async (req, res) => {
   try {
@@ -723,7 +829,7 @@ export const forgotPassword = async (req, res) => {
     if (!company) {
       return res.json({ success: false, message: "Company not found with this email" });
     }
-    
+
     // Generate random 8-character password
     const tempPassword = Math.random().toString(36).slice(-8) + "!";
     const salt = await bcrypt.genSalt(10);
@@ -782,14 +888,11 @@ export const updatePassword = async (req, res) => {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
+    const { password: _, ...companyWithoutPassword } = company;
+
     res.json({
       success: true,
-      company: {
-        id: company.id,
-        name: company.name,
-        email: company.email,
-        image: company.image
-      },
+      company: companyWithoutPassword,
       message: "Password updated successfully"
     });
   } catch (error) {
@@ -876,6 +979,25 @@ export const updateCompanyProfile = async (req, res) => {
           console.error("Cloudinary upload failed during profile update:", error.message);
         }
       }
+
+      if (!imageUrl) {
+        try {
+          const fs = await import('fs');
+          const path = await import('path');
+          const { fileURLToPath } = await import('url');
+          const __dirname = path.dirname(fileURLToPath(import.meta.url));
+          const uploadDir = path.join(__dirname, '../public/uploads');
+          if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+          }
+          const filename = `company_${Date.now()}_${imageFile.originalname.replace(/\s+/g, '_')}`;
+          fs.writeFileSync(path.join(uploadDir, filename), imageFile.buffer);
+          imageUrl = `${req.protocol}://${req.get('host')}/uploads/${filename}`;
+        } catch (localErr) {
+          console.error("Local upload failed during profile update:", localErr);
+        }
+      }
+
       if (imageUrl) {
         updateData.image = imageUrl;
       }
@@ -889,7 +1011,7 @@ export const updateCompanyProfile = async (req, res) => {
     // --- SYNC TO CRM CLIENT (Partner Directory) ---
     try {
       const clientLocation = [updatedCompany.city, updatedCompany.state].filter(Boolean).join(", ") || updatedCompany.country;
-      
+
       let client = await prisma.client.findFirst({
         where: { companyId }
       });

@@ -2,26 +2,27 @@ import prisma from "../config/prisma.js";
 
 export const getStats = async (req, res) => {
     try {
-        const [userCount, crmCandidateCount, companies, jobs] = await Promise.all([
-            prisma.userProfile.count(),
+        const [crmCandidateCount, companies, visibleJobs] = await Promise.all([
             prisma.cRMCandidate.count({ 
                 where: { 
-                    isDeleted: false,
-                    source: { not: "JobMela Portal" }
+                    isDeleted: false
                 } 
             }),
             prisma.company.count(),
-            prisma.job.count({ where: { visible: true } })
+            prisma.job.findMany({
+                where: { visible: true },
+                select: { openings: true, vacancies: true }
+            })
         ]);
 
-        const jobseekers = userCount + crmCandidateCount;
+        const totalVacancies = visibleJobs.reduce((sum, job) => sum + (job.vacancies ?? job.openings ?? 0), 0);
 
         res.json({
             success: true,
             stats: {
-                jobseekers,
+                jobseekers: crmCandidateCount,
                 companies,
-                jobs
+                jobs: totalVacancies
             }
         });
     } catch (error) {

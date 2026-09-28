@@ -20,14 +20,21 @@ const extractToken = (req, preferredCookie) => {
     return specificToken;
   }
 
-  // Fallback to Authorization Bearer header
+  // Fallback to Authorization header (with or without 'Bearer ')
   const authHeader = req.headers?.authorization;
-  if (authHeader?.startsWith('Bearer ')) {
-    const headerToken = authHeader.split(' ')[1];
+  if (authHeader) {
+    const headerToken = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : authHeader;
     if (headerToken && headerToken !== 'undefined' && headerToken !== 'null') {
       req.tokenSource = 'authorization';
       return headerToken;
     }
+  }
+
+  // Fallback to custom headers: token, x-admin-token, admintoken
+  const customToken = req.headers?.token || req.headers?.['x-admin-token'] || req.headers?.admintoken;
+  if (customToken && customToken !== 'undefined' && customToken !== 'null') {
+    req.tokenSource = 'header';
+    return customToken;
   }
 
   return undefined;

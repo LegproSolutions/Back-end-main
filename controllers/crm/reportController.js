@@ -99,8 +99,51 @@ export const getCRMReportsSummary = async (req, res) => {
     ]);
 
     const selectionRatio = total > 0 ? Math.round(((joined + rejected) / total) * 100) : 0;
-    const joiningRatio = (joined + dropout) > 0 ? Math.round((joined / (joined + dropout)) * 100) : 0;
-    const dropoutRatio = (joined + dropout) > 0 ? Math.round((dropout / (joined + dropout)) * 100) : 0;
+    const joiningRatio = total > 0 ? Math.round((joined / total) * 100) : 0;
+    const dropoutRatio = total > 0 ? Math.round((dropout / total) * 100) : 0;
+
+    // 5. Monthly Funnel calculation
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const currentMonthIdx = new Date().getMonth();
+    const last6Months = [];
+    const monthlyFunnelMap = {};
+    
+    for (let i = 5; i >= 0; i--) {
+      const idx = (currentMonthIdx - i + 12) % 12;
+      const mName = months[idx];
+      last6Months.push(mName);
+      monthlyFunnelMap[mName] = { month: mName, applied: 0, screened: 0, interviewed: 0, hired: 0 };
+    }
+
+    const allCandidates = await prisma.cRMCandidate.findMany({
+      where: { ...clientWhereClause, isDeleted: false },
+      select: { createdAt: true, status: true }
+    });
+
+    allCandidates.forEach(c => {
+      const date = new Date(c.createdAt);
+      const monthName = date.toLocaleString('default', { month: 'short' });
+      if (monthlyFunnelMap[monthName]) {
+        monthlyFunnelMap[monthName].applied += 1;
+        
+        const status = c.status;
+        const isScreened = !["new_lead", "Applied"].includes(status);
+        const isInterviewed = ["Qualified", "Interview Scheduled", "Interviewed", "Selected", "Offer Released", "Joined"].includes(status);
+        const isHired = status === "Joined";
+
+        if (isScreened) {
+          monthlyFunnelMap[monthName].screened += 1;
+        }
+        if (isInterviewed) {
+          monthlyFunnelMap[monthName].interviewed += 1;
+        }
+        if (isHired) {
+          monthlyFunnelMap[monthName].hired += 1;
+        }
+      }
+    });
+
+    const monthlyFunnel = last6Months.map(m => monthlyFunnelMap[m]);
 
     res.json({
       success: true,
@@ -108,6 +151,7 @@ export const getCRMReportsSummary = async (req, res) => {
         sourcePerformance,
         recruiterPerformance,
         locationWise,
+        monthlyFunnel,
         statistics: {
           totalApplications: total,
           joined,
