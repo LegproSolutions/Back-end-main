@@ -256,6 +256,9 @@ model CRMCandidate {
   @@index([client_id])
   @@index([status])
   @@index([createdAt])
+  @@index([isDeleted])
+  @@index([source])
+  @@index([userId])
 }
 
 model PipelineStage {

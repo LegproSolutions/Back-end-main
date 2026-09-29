@@ -1,6 +1,14 @@
 import { PrismaClient } from "@prisma/client";
 
-const prismaClient = new PrismaClient();
+let dbUrl = process.env.DATABASE_URL || "";
+if (dbUrl && !dbUrl.includes("connection_limit=")) {
+  const sep = dbUrl.includes("?") ? "&" : "?";
+  dbUrl = `${dbUrl}${sep}connection_limit=25&pool_timeout=30`;
+}
+
+const prismaClient = new PrismaClient(
+  dbUrl ? { datasources: { db: { url: dbUrl } } } : undefined
+);
 
 // ==========================================
 // TWO-WAY SYNCHRONIZATION HELPERS (BYPASS HOOKS)

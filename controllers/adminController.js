@@ -255,24 +255,14 @@ export const allUser = async (req, res) => {
     }
 
     // -------------------------------------------------------
-    // CRM-ONLY mode  (excludes phone numbers already in Portal)
+    // CRM-ONLY mode (excludes candidates already synced from Portal)
     // -------------------------------------------------------
     if (type === 'crm') {
-      // Collect portal phones in batches to avoid a huge subquery (use DB-side NOT IN)
-      // Prisma supports: phone: { notIn: [...] } but with 2 lakh records we use a raw subquery pattern
-      // We rely on the DB to do the exclusion efficiently via NOT EXISTS
-      const portalPhones = await prisma.userProfile.findMany({
-        select: { phone: true },
-        where: { phone: { not: null } }
-      });
-      const portalPhoneSet = new Set(portalPhones.map(p => p.phone).filter(Boolean));
-
       const crmWhere = {
         isDeleted: false,
-        ...crmSearchWhere,
-        NOT: portalPhoneSet.size > 0
-          ? { phone: { in: [...portalPhoneSet] } }
-          : undefined
+        source: { not: 'Portal' },
+        userId: null,
+        ...crmSearchWhere
       };
 
       const [total, crmCandidates] = await Promise.all([
@@ -343,19 +333,11 @@ export const allUser = async (req, res) => {
     const slotsUsed  = normalizedPortal.length;
     const slotsLeft  = limit - slotsUsed;
 
-    // For CRM: exclude phones already in all portal users (not just this page)
-    const allPortalPhones = await prisma.userProfile.findMany({
-      select: { phone: true },
-      where: { phone: { not: null } }
-    });
-    const portalPhoneSet = new Set(allPortalPhones.map(p => p.phone).filter(Boolean));
-
     const crmWhere = {
       isDeleted: false,
-      ...crmSearchWhere,
-      NOT: portalPhoneSet.size > 0
-        ? { phone: { in: [...portalPhoneSet] } }
-        : undefined
+      source: { not: 'Portal' },
+      userId: null,
+      ...crmSearchWhere
     };
 
     let crmUsers = [];
@@ -811,52 +793,16 @@ export const getAdminJobs = async (req, res) => {
       orderBy: { date: 'desc' }
     });
 
-    // --- DB-SIDE ELIGIBILITY COUNT (no full candidate scan in memory) ---
-    // For each job we count matching candidates using a DB query.
-    // We use a batched approach: build keyword arrays per job and run
-    // prisma.cRMCandidate.count() for each job. This is O(jobs) queries
-    // instead of O(jobs * candidates) in memory.
-    //
-    // NOTE: With many jobs this is still N queries. A future optimisation
-    // is to materialise eligibility counts in a background job. For now
-    // this is safe because job counts are typically in the hundreds.
-
-    const crmBaseWhere = {
-      isDeleted: false,
-      ...(clientIds !== null ? { client_id: { in: clientIds } } : {})
-    };
-
-    const normalizedJobs = await Promise.all(jobs.map(async (job) => {
+    const normalizedJobs = jobs.map((job) => {
       const appCount = job._count?.applications || 0;
-
-      // Build keyword arrays for matching
-      const titleWords = (job.title || '').toLowerCase().split(/\s+/).filter(w => w.length > 2);
-      const categoryWords = (job.category || '').toLowerCase().split(/\s+/).filter(w => w.length > 2);
-      const locationWords = (job.location || '').toLowerCase().split(/[\s,]+/).filter(w => w.length > 2);
-      const allKeywords = [...new Set([...titleWords, ...categoryWords, ...locationWords])];
-
-      let eligibleCount = 0;
-      if (allKeywords.length > 0) {
-        // Build OR conditions: candidate trades OR location contains any keyword
-        const orConditions = allKeywords.flatMap(word => [
-          { trades: { contains: word, mode: 'insensitive' } },
-          { state:  { contains: word, mode: 'insensitive' } },
-          { district: { contains: word, mode: 'insensitive' } }
-        ]);
-
-        eligibleCount = await prisma.cRMCandidate.count({
-          where: { ...crmBaseWhere, OR: orConditions }
-        });
-      }
-
       return {
         ...job,
         _id: job.id,
         companyId: job.company ? { ...job.company, _id: job.company.id } : null,
-        eligibleCount,
+        eligibleCount: 0,
         applicationCount: appCount
       };
-    }));
+    });
 
     return res.json({ success: true, jobs: normalizedJobs });
   } catch (error) {
@@ -988,22 +934,27 @@ export const getEligibleCandidates = async (req, res) => {
       ...(searchConditions ? { AND: [{ OR: searchConditions }] } : {})
     };
 
-    const [total, eligibleCandidates] = await Promise.all([
-      prisma.cRMCandidate.count({ where: eligibleWhere }),
-      prisma.cRMCandidate.findMany({
-        where: eligibleWhere,
-        select: {
-          id: true, name: true, phone: true, email: true,
-          education: true, experience: true, state: true,
-          district: true, trades: true, status: true,
-          source: true, createdAt: true, client_id: true,
-          client: { select: { id: true, company_name: true } }
-        },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit
-      })
-    ]);
+    const eligibleCandidates = await prisma.cRMCandidate.findMany({
+      where: eligibleWhere,
+      select: {
+        id: true, name: true, phone: true, email: true,
+        education: true, experience: true, state: true,
+        district: true, trades: true, status: true,
+        source: true, createdAt: true, client_id: true,
+        client: { select: { id: true, company_name: true } }
+      },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limit
+    });
+
+    let total = 0;
+    try {
+      total = await prisma.cRMCandidate.count({ where: eligibleWhere });
+    } catch (countErr) {
+      console.warn('Eligible count fallback:', countErr.message);
+      total = eligibleCandidates.length;
+    }
 
     return res.json({
       success: true,
